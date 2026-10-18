@@ -234,6 +234,15 @@ public abstract class ADataController {
         }
     }
 
+    /**
+     * 判断该控制器是否已被关闭。
+     *
+     * @return 是否已关闭
+     */
+    public boolean isDestroyed() {
+        return destroyed;
+    }
+
     protected <T> void invokeCallback(IAsyncReadCallback<T> callback, T result) {
         if (callback == null) {
             return;

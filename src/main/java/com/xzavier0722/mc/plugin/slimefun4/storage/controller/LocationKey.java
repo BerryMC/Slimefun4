@@ -13,6 +13,15 @@ public class LocationKey extends ScopeKey {
         this.location = location;
     }
 
+    /**
+     * 返回该作用域键对应的位置。
+     *
+     * @return 位置 {@link Location}
+     */
+    public Location getLocation() {
+        return location;
+    }
+
     @Override
     protected String getKeyStr() {
         return scope + "/" + LocationUtils.getLocKey(location);

@@ -33,6 +33,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.logging.Level;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -93,6 +94,10 @@ public class BlockDataController extends ADataController {
      * {@link ChunkDataLoadMode}
      */
     private ChunkDataLoadMode chunkDataLoadMode;
+    /**
+     * 是否在区块卸载时驱逐区块缓存
+     */
+    private boolean chunkDataEvictionEnabled = true;
 
     /**
      * 初始化加载中标志
@@ -117,6 +122,7 @@ public class BlockDataController extends ADataController {
     public void init(IDataSourceAdapter<?> dataAdapter, int maxReadThread, int maxWriteThread) {
         super.init(dataAdapter, maxReadThread, maxWriteThread);
         this.chunkDataLoadMode = Slimefun.getDatabaseManager().getChunkDataLoadMode();
+        this.chunkDataEvictionEnabled = Slimefun.getDatabaseManager().isChunkDataEvictionEnabled();
         initLoadData();
     }
 
@@ -1296,6 +1302,138 @@ public class BlockDataController extends ADataController {
             }
         });
         return re;
+    }
+
+    public ChunkDataLoadMode getChunkDataLoadMode() {
+        return chunkDataLoadMode;
+    }
+
+    /**
+     * 返回是否启用了区块卸载驱逐。
+     *
+     * @return 是否启用区块卸载驱逐
+     */
+    public boolean isChunkDataEvictionEnabled() {
+        return chunkDataEvictionEnabled;
+    }
+
+    /**
+     * 驱逐单个区块的 Slimefun 方块数据缓存。
+     * <p>
+     * 用于区块卸载时回收该区块占用的内存, 防止 {@code loadedChunk} 随服务器生命周期内
+     * 累计加载的区块数无界增长。驱逐前会:
+     * <ol>
+     * <li>将处于脏状态的机器物品栏先写回数据库;</li>
+     * <li>立即执行并移除该区块的延迟写任务, 避免其闭包继续持有容器;</li>
+     * <li>移除该区块内的物品栏快照条目;</li>
+     * <li>停用该区块内机器的 ticker。</li>
+     * </ol>
+     * 被驱逐的数据会在区块重新加载时由 {@link #loadChunk(Chunk, boolean)} 从数据库恢复。
+     *
+     * @param chunk 目标区块
+     */
+    public void unloadChunkData(Chunk chunk) {
+        var chunkKey = LocationUtils.getChunkKey(chunk);
+        evictChunkBlocks(loadedChunk.remove(chunkKey));
+        flushDelayedTasks(chunkKey::equals);
+    }
+
+    /**
+     * 驱逐某个世界下的全部 Slimefun 区块数据缓存。
+     * <p>
+     * 用于世界卸载时回收内存, 包括那些"已缓存但从未加载过区块"的条目。
+     *
+     * @param world 目标世界
+     */
+    public void unloadWorldChunkData(World world) {
+        var prefix = world.getName() + ";";
+        loadedChunk.entrySet().removeIf(entry -> {
+            if (!entry.getKey().startsWith(prefix)) {
+                return false;
+            }
+            evictChunkBlocks(entry.getValue());
+            return true;
+        });
+
+        flushDelayedTasks(chunkKey -> chunkKey.startsWith(prefix));
+    }
+
+    /**
+     * 清理单个被驱逐区块内的方块数据：落库脏物品栏, 移除快照并停用机器 ticker。
+     *
+     * @param cache 被驱逐的区块数据容器, 允许为 null
+     */
+    private void evictChunkBlocks(@Nullable SlimefunChunkData cache) {
+        if (cache == null) {
+            return;
+        }
+
+        for (var blockData : cache.getAllBlockData()) {
+            if (blockData.isPendingRemove() || !blockData.isDataLoaded()) {
+                continue;
+            }
+
+            var menu = blockData.getBlockMenu();
+            // 将未保存的脏物品栏先写回数据库, 防止驱逐造成物品丢失
+            if (menu != null && menu.isDirty()) {
+                menu.lock();
+                try {
+                    saveBlockInventory(blockData);
+                } finally {
+                    menu.unlock();
+                }
+            }
+
+            invSnapshots.remove(blockData.getKey());
+
+            if (Slimefun.getRegistry().getTickerBlocks().contains(blockData.getSfId())) {
+                Slimefun.getTickerTask().disableTicker(blockData.getLocation());
+            }
+        }
+    }
+
+    /**
+     * 立即执行并移除所有作用于被驱逐区块的延迟写任务。
+     * <p>
+     * 这些任务以 {@link LocationKey} 或 {@link ChunkKey} 作为作用域键, 其闭包持有对应的
+     * {@link SlimefunBlockData}/{@link SlimefunChunkData} 引用, 若不清理会阻止被驱逐的
+     * 容器被垃圾回收。这里立即执行一次写库, 保证数据不丢失。
+     *
+     * @param chunkKeyMatcher 用于判断某个区块键是否属于被驱逐范围的谓词
+     */
+    private void flushDelayedTasks(@Nonnull Predicate<String> chunkKeyMatcher) {
+        synchronized (delayedWriteTasks) {
+            var iterator = delayedWriteTasks.entrySet().iterator();
+            while (iterator.hasNext()) {
+                var entry = iterator.next();
+                String parentChunkKey = resolveChunkKey(entry.getKey().getParent());
+
+                if (parentChunkKey != null && chunkKeyMatcher.test(parentChunkKey)) {
+                    entry.getValue().runUnsafely();
+                    iterator.remove();
+                }
+            }
+        }
+    }
+
+    /**
+     * 解析某个延迟写任务作用域键所属的区块键。
+     *
+     * @param parent 作用域键
+     * @return 区块键, 若该作用域与区块无关则为 null
+     */
+    @Nullable private String resolveChunkKey(@Nullable ScopeKey parent) {
+        if (parent instanceof ChunkKey chunkKey) {
+            return chunkKey.getChunkKey();
+        }
+
+        if (parent instanceof LocationKey locationKey) {
+            var location = locationKey.getLocation();
+            var world = location == null ? null : location.getWorld();
+            return world == null ? null : LocationUtils.getChunkKey(location);
+        }
+
+        return null;
     }
 
     public void removeFromAllChunkInWorld(World world, String key) {

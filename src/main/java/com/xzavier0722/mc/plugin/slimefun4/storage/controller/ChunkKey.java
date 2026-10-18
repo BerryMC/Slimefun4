@@ -17,6 +17,15 @@ public class ChunkKey extends ScopeKey {
         this.chunkKey = chunkKey;
     }
 
+    /**
+     * 返回该作用域键对应的区块键, 形如 {@code world;x:z}。
+     *
+     * @return 区块键
+     */
+    public String getChunkKey() {
+        return chunkKey;
+    }
+
     @Override
     protected String getKeyStr() {
         return scope + "/" + chunkKey;

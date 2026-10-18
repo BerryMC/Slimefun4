@@ -27,12 +27,21 @@ public class PlayerProfileListener implements Listener {
 
     @EventHandler(priority = EventPriority.LOWEST)
     public void onDisconnect(PlayerQuitEvent e) {
+        var uuid = e.getPlayer().getUniqueId();
         Optional<PlayerProfile> profile = PlayerProfile.find(e.getPlayer());
 
-        // if we still have a profile of this Player in memory, delete it
-        profile.ifPresent(PlayerProfile::markForDeletion);
-        Slimefun.getDatabaseManager()
-                .getProfileDataController()
-                .invalidateCache(e.getPlayer().getUniqueId().toString());
+        profile.ifPresent(p -> {
+            p.markForDeletion();
+
+            // 落盘未保存的 waypoint 等数据, 避免直接丢弃内存档案造成数据丢失
+            if (p.isDirty()) {
+                p.save();
+            }
+        });
+
+        Slimefun.getDatabaseManager().getProfileDataController().invalidateCache(uuid.toString());
+
+        // 数据已落盘(或本无脏数据), 从全局档案注册表移除该玩家, 立即释放内存, 无需等待自动保存周期
+        profile.ifPresent(p -> Slimefun.getRegistry().getPlayerProfiles().remove(uuid, p));
     }
 }

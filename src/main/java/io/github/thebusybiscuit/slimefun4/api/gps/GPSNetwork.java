@@ -59,7 +59,7 @@ public class GPSNetwork {
     private final int[] inventory = {19, 20, 21, 22, 23, 24, 25, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43
     };
 
-    private final Map<UUID, Set<Location>> transmitters = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<Location, Integer>> transmitters = new ConcurrentHashMap<>();
     private final TeleportationManager teleportation = new TeleportationManager();
 
     private final ResourceManager resourceManager;
@@ -91,12 +91,26 @@ public class GPSNetwork {
      *            Whether that {@link GPSTransmitter} is online
      */
     public void updateTransmitter(@Nonnull Location l, @Nonnull UUID uuid, boolean online) {
-        Set<Location> set = transmitters.computeIfAbsent(uuid, id -> new HashSet<>());
-
         if (online) {
-            set.add(l);
+            // 在注册时就把信号强度计算好, 使网络复杂度不再依赖发射器所在区块的数据是否仍在缓存中
+            SlimefunItem item = StorageCacheUtils.getSlimefunItem(l);
+            int multiplier = item instanceof GPSTransmitter transmitter
+                    ? transmitter.getMultiplier(Math.max(l.getBlockY(), 0))
+                    : 0;
+
+            transmitters.computeIfAbsent(uuid, id -> new ConcurrentHashMap<>()).put(l, multiplier);
         } else {
-            set.remove(l);
+            Map<Location, Integer> map = transmitters.get(uuid);
+            if (map == null) {
+                return;
+            }
+
+            map.remove(l);
+
+            // 该玩家的发射器已全部离线/拆除, 移除整个条目, 避免空集合随玩家数量无界累积
+            if (map.isEmpty()) {
+                transmitters.remove(uuid);
+            }
         }
     }
 
@@ -111,19 +125,16 @@ public class GPSNetwork {
      * @return The network complexity for that {@link UUID}
      */
     public int getNetworkComplexity(@Nonnull UUID uuid) {
-        Set<Location> locations = transmitters.get(uuid);
+        Map<Location, Integer> map = transmitters.get(uuid);
 
-        if (locations == null) {
+        if (map == null) {
             return 0;
         }
 
         int level = 0;
-        for (Location l : locations) {
-            SlimefunItem item = StorageCacheUtils.getSlimefunItem(l);
 
-            if (item instanceof GPSTransmitter transmitter) {
-                level += transmitter.getMultiplier(Math.max(l.getBlockY(), 0));
-            }
+        for (int multiplier : map.values()) {
+            level += multiplier;
         }
 
         return level;
@@ -139,8 +150,8 @@ public class GPSNetwork {
      * @return The amount of transmitters
      */
     public int countTransmitters(@Nonnull UUID uuid) {
-        Set<Location> locations = transmitters.get(uuid);
-        return locations == null ? 0 : locations.size();
+        Map<Location, Integer> map = transmitters.get(uuid);
+        return map == null ? 0 : map.size();
     }
 
     /**
@@ -192,14 +203,15 @@ public class GPSNetwork {
         });
 
         int index = 0;
-        for (Location l : getTransmitters(p.getUniqueId())) {
-            if (index >= inventory.length) {
-                break;
-            }
+        var owned = transmitters.get(p.getUniqueId());
 
-            SlimefunItem sfi = StorageCacheUtils.getSlimefunItem(l);
+        if (owned != null) {
+            for (var entry : owned.entrySet()) {
+                if (index >= inventory.length) {
+                    break;
+                }
 
-            if (sfi instanceof GPSTransmitter transmitter) {
+                Location l = entry.getKey();
                 int slot = inventory[index];
 
                 menu.addItem(
@@ -212,7 +224,7 @@ public class GPSNetwork {
                                 "&8\u21E8 &7Y: &f" + l.getY(),
                                 "&8\u21E8 &7Z: &f" + l.getZ(),
                                 "",
-                                "&8\u21E8 &7信号强度: &f" + transmitter.getMultiplier(l.getBlockY()),
+                                "&8\u21E8 &7信号强度: &f" + entry.getValue(),
                                 "&8\u21E8 &7延迟: &f" + NumberUtils.roundDecimalNumber(1000D / l.getY()) + "ms"));
                 menu.addMenuClickHandler(slot, ChestMenuUtils.getEmptyClickHandler());
 
@@ -445,7 +457,8 @@ public class GPSNetwork {
      */
     @Nonnull
     public Set<Location> getTransmitters(@Nonnull UUID uuid) {
-        return transmitters.getOrDefault(uuid, new HashSet<>());
+        var map = transmitters.get(uuid);
+        return map == null ? new HashSet<>() : new HashSet<>(map.keySet());
     }
 
     /**
