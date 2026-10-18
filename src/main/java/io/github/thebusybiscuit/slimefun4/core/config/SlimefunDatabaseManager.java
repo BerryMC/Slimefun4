@@ -201,6 +201,18 @@ public class SlimefunDatabaseManager {
         return ChunkDataLoadMode.valueOf(blockStorageConfig.getString("dataLoadMode"));
     }
 
+    /**
+     * 是否在区块卸载时驱逐该区块的内存缓存。
+     * <p>
+     * 仅在 {@link ChunkDataLoadMode#LOAD_WITH_CHUNK} 模式下有意义, 用于避免区块缓存随
+     * 服务器运行时间无界增长; 被驱逐的区块会在下次加载时从数据库重新读取。
+     *
+     * @return 是否启用区块卸载驱逐
+     */
+    public boolean isChunkDataEvictionEnabled() {
+        return blockStorageConfig.getBoolean("chunkDataEviction.enable");
+    }
+
     public StorageType getBlockDataStorageType() {
         return blockDataStorageType;
     }
@@ -224,6 +236,11 @@ public class SlimefunDatabaseManager {
 
         if (blockStorageConfig.getString("dataLoadMode") == null) {
             blockStorageConfig.setDefaultValue("dataLoadMode", "LOAD_WITH_CHUNK");
+            changed = true;
+        }
+
+        if (blockStorageConfig.getString("chunkDataEviction.enable") == null) {
+            blockStorageConfig.setDefaultValue("chunkDataEviction.enable", true);
             changed = true;
         }
 

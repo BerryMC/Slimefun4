@@ -560,6 +560,9 @@ public class TickerTask implements Runnable {
     public void disableTicker(@Nonnull Location l) {
         Validate.notNull(l, "Location cannot be null!");
 
+        // 该机器已停用, 不再需要为其保留错误计数
+        bugs.remove(new BlockPosition(l));
+
         synchronized (tickingLocations) {
             ChunkPosition chunk = new ChunkPosition(l.getWorld(), l.getBlockX() >> 4, l.getBlockZ() >> 4);
             Set<TickLocation> locations = tickingLocations.get(chunk);
@@ -588,7 +591,18 @@ public class TickerTask implements Runnable {
         Validate.notNull(uuid, "Universal Data ID cannot be null!");
 
         synchronized (tickingLocations) {
-            tickingLocations.values().forEach(loc -> loc.removeIf(tk -> uuid.equals(tk.getUuid())));
+            tickingLocations
+                    .values()
+                    .forEach(loc -> loc.removeIf(tk -> {
+                        if (uuid.equals(tk.getUuid())) {
+                            bugs.remove(tk.getPosition());
+                            return true;
+                        }
+                        return false;
+                    }));
+
+            // 清理已清空的区块条目, 避免 tickingLocations 保留不再使用的键
+            tickingLocations.values().removeIf(Set::isEmpty);
         }
     }
 
